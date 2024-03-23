@@ -11,7 +11,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 if args.wandb:
     wandb.init(
-        entity="anonymized",
+        entity="ping-tuo",
         settings=wandb.Settings(start_method="fork"),
         project="betawolf",
         name=args.run_name,
@@ -26,7 +26,7 @@ trainer = pl.Trainer(
     num_sanity_val_steps=0,
     limit_train_batches=args.limit_train_batches,
     limit_val_batches=args.limit_val_batches,
-    enable_progress_bar=not (args.wandb or args.no_tqdm) or os.getlogin() == 'anonymized',
+    enable_progress_bar=not (args.wandb or args.no_tqdm) or os.getlogin() == 'ping-tuo',
     gradient_clip_val=args.grad_clip,
     callbacks=[
         ModelCheckpoint(
