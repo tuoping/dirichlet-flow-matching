@@ -11,7 +11,6 @@ import os, copy
 
 from torch import nn
 import torch.nn.functional as F
-from model.promoter_model import GaussianFourierProjection, Dense
 
 from model.dna_models import CNNModel3D, MLPModel
 from utils.flow_utils import DirichletConditionalFlow, simplex_proj
