@@ -57,7 +57,7 @@ class CLSModule(GeneralModule):
         self.iter_step += 1
         seq, cls = batch
         cls = cls.squeeze()
-        B, L = seq.shape
+        B, L, _ = seq.shape
 
         xt, alphas = sample_cond_prob_path(self.args, seq, self.model.alphabet_size)
         xt_inp = xt

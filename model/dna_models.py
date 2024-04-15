@@ -1,5 +1,6 @@
 import copy
 
+import torch
 from torch import nn
 import torch.nn.functional as F
 from model.promoter_model import GaussianFourierProjection, Dense
@@ -9,35 +10,49 @@ class MLPModel(nn.Module):
     def __init__(self, args, alphabet_size, num_cls, classifier=False):
         super().__init__()
         self.alphabet_size = alphabet_size
+        self.args = args
         self.classifier = classifier
         self.num_cls = num_cls
 
 
         self.time_embedder = nn.Sequential(GaussianFourierProjection(embed_dim= args.hidden_dim),nn.Linear(args.hidden_dim, args.hidden_dim))
-        self.embedder = nn.Linear((1 if classifier and not args.cls_expanded_simplex else 2) * self.alphabet_size,  args.hidden_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(args.hidden_dim, args.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(args.hidden_dim, args.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(args.hidden_dim, args.hidden_dim if classifier else self.alphabet_size)
-        )
+        self.embedder = nn.Linear(self.alphabet_size,  args.hidden_dim)
+        self.num_layers = 4*args.num_cnn_stacks
+        self.mlp = nn.ModuleList(
+            [layer for layer in [
+                nn.Linear(args.hidden_dim, args.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(args.hidden_dim, args.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(args.hidden_dim, args.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(args.hidden_dim, args.hidden_dim),
+                nn.ReLU()] for i in range(args.num_cnn_stacks)])
+        self.final_layer = nn.Linear(args.hidden_dim, args.hidden_dim if classifier else self.alphabet_size)
         if classifier:
             self.cls_head = nn.Sequential(nn.Linear(args.hidden_dim, args.hidden_dim),
                                    nn.ReLU(),
                                    nn.Linear(args.hidden_dim, self.num_cls))
-        if self.args.cls_free_guidance and not self.classifier:
-            self.cls_embedder = nn.Embedding(num_embeddings=self.num_cls + 1, embedding_dim=args.hidden_dim)
+        # if self.args.cls_free_guidance and not self.classifier:
+        #     self.cls_embedder = nn.Embedding(num_embeddings=self.num_cls + 1, embedding_dim=args.hidden_dim)
 
 
     def forward(self, seq,t, cls=None):
-        time_embed = self.time_embedder(t)
-        feat = self.embedder(seq)
-        feat = feat + time_embed[:,None,:]
-        if self.args.cls_free_guidance and not self.classifier:
-            feat = feat + self.cls_embedder(cls)[:, None, :]
-        feat = self.mlp(feat)
+        if self.args.clean_data:
+            feat = self.embedder(seq)
+        else:
+            time_embed = self.time_embedder(t)
+            feat = self.embedder(seq)
+            feat = feat + time_embed[:,None,None,None,:]
+        # if self.args.cls_free_guidance and not self.classifier:
+        #     feat = feat + self.cls_embedder(cls)[:, None, :]
+        for i in range(self.num_layers):
+            feat = self.mlp[i](feat)
+        feat = self.final_layer(feat)
+        
+        feat = feat.permute(0,4,1,2,3)
         if self.classifier:
+            raise Exception("Classifier not implemented")
             return self.cls_head(feat.mean(dim=1))
         else:
             return feat
@@ -57,6 +72,7 @@ class CNNModel(nn.Module):
             inp_size = self.alphabet_size * (2 if expanded_simplex_input else 1)
             if (args.mode == 'ardm' or args.mode == 'lrar') and not classifier:
                 inp_size += 1 # plus one for the mask token of these models
+
             self.linear = nn.Conv1d(inp_size, args.hidden_dim, kernel_size=9, padding=4)
             self.time_embedder = nn.Sequential(GaussianFourierProjection(embed_dim= args.hidden_dim),nn.Linear(args.hidden_dim, args.hidden_dim))
 
@@ -115,6 +131,85 @@ class CNNModel(nn.Module):
             else:
                 return self.cls_head(feat)
         return feat
+    
+from memory_profiler import profile
+
+class CNNModel3D(nn.Module):
+    def __init__(self, args, alphabet_size, num_cls, classifier=False):
+        super(CNNModel3D, self).__init__()
+        self.alphabet_size = alphabet_size
+        self.args = args
+        self.classifier = classifier
+        self.num_cls = num_cls
+
+        inp_size = self.alphabet_size
+
+        self.linear = nn.Conv3d(inp_size, args.hidden_dim, kernel_size=9)
+        self.time_embedder = nn.Sequential(GaussianFourierProjection(embed_dim= args.hidden_dim),nn.Linear(args.hidden_dim, args.hidden_dim))
+
+        self.num_layers = 4 * args.num_cnn_stacks
+        self.convs = nn.ModuleList([layer for layer in [nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=9, padding=4),
+                      nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=9, padding=4),
+                      nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=9, dilation=2, padding=8),
+                      nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=9, dilation=4, padding=16)] for i in range(args.num_cnn_stacks)])
+                      # nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=9, dilation=16, padding=64),
+                      # nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=9, dilation=64, padding=256)]
+        self.time_layers = nn.ModuleList([Dense(args.hidden_dim, args.hidden_dim) for _ in range(self.num_layers)])
+        self.norms = nn.ModuleList([nn.LayerNorm(args.hidden_dim) for _ in range(self.num_layers)])
+        self.final_conv = nn.Sequential(nn.Conv3d(args.hidden_dim, args.hidden_dim, kernel_size=1),
+                                   nn.ReLU(),
+                                   nn.Conv3d(args.hidden_dim, args.hidden_dim if classifier else self.alphabet_size, kernel_size=1))
+        self.dropout = nn.Dropout(args.dropout)
+        if classifier:
+            self.cls_head = nn.Sequential(nn.Linear(args.hidden_dim, args.hidden_dim),
+                                   nn.ReLU(),
+                                   nn.Linear(args.hidden_dim, self.num_cls))
+
+        if self.args.cls_free_guidance and not self.classifier:
+            self.cls_embedder = nn.Embedding(num_embeddings=self.num_cls + 1, embedding_dim=args.hidden_dim)
+            self.cls_layers = nn.ModuleList([Dense(args.hidden_dim, args.hidden_dim) for _ in range(self.num_layers)])
+    
+    # @profile
+    def forward(self, seq, t, cls = None, return_embedding=False):
+        if self.args.clean_data:
+            # feat = feat.permute(0, 2, 1)
+            feat = seq.permute(0,4,1,2,3)
+            feat = F.pad(feat, (4, 4, 4, 4, 4, 4), mode='circular')
+            feat = self.linear(feat)
+        else:
+            time_emb = F.relu(self.time_embedder(t))
+            # feat = seq.permute(0, 2, 1)
+            feat = seq.permute(0,4,1,2,3)
+            feat = F.pad(feat, (4, 4, 4, 4, 4, 4), mode='circular')
+            feat = F.relu(self.linear(feat))
+
+        if self.args.cls_free_guidance and not self.classifier:
+            cls_emb = self.cls_embedder(cls)
+
+        for i in range(self.num_layers):
+            h = self.dropout(feat)
+            if not self.args.clean_data:
+                h = h + self.time_layers[i](time_emb)[:, :, None, None, None]
+            if self.args.cls_free_guidance and not self.classifier:
+                h = h + self.cls_layers[i](cls_emb)[:, :, None, None, None]
+            h = self.norms[i]((h).permute(0,2,3,4,1))
+            h = F.relu(self.convs[i](h.permute(0,4,1,2,3)))
+            if h.shape == feat.shape:
+                feat = h + feat
+            else:
+                feat = h
+
+        feat = self.final_conv(feat)
+        if self.classifier:
+            raise Exception("Classifier not implemented")
+            feat = feat.mean(dim=1)
+            if return_embedding:
+                embedding = self.cls_head[:1](feat)
+                return self.cls_head[1:](embedding), embedding
+            else:
+                return self.cls_head(feat)
+        return feat
+
 
 class TransformerModel(nn.Module):
     def __init__(self, args, alphabet_size, num_cls, classifier=False):

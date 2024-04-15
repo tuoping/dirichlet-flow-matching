@@ -1,23 +1,26 @@
 from torch.utils.data import WeightedRandomSampler, Subset
 
 from lightning_modules.dna_module import DNAModule
-from utils.dataset import ToyDataset, TwoClassOverfitDataset, EnhancerDataset
+from utils.dataset import ToyDataset, TwoClassOverfitDataset, EnhancerDataset, IsingDataset, AlCuDataset
 from utils.parsing import parse_train_args
 args = parse_train_args()
 import torch, os, wandb
 torch.manual_seed(0)
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+print("wandb initiating:: ")
 if args.wandb:
     wandb.init(
         entity="ping-tuo",
         settings=wandb.Settings(start_method="fork"),
-        project="betawolf",
+        project=args.project_name,
         name=args.run_name,
         config=args,
     )
-
+print("wandb initiated")
 trainer = pl.Trainer(
     default_root_dir=os.environ["MODEL_DIR"],
     accelerator="gpu" if torch.cuda.is_available() else 'auto',
@@ -40,7 +43,7 @@ trainer = pl.Trainer(
     check_val_every_n_epoch=args.check_val_every_n_epoch,
     val_check_interval=args.val_check_interval,
 )
-
+print("trainer initiated")
 
 if args.dataset_type == 'toy_fixed':
     train_ds = TwoClassOverfitDataset(args)
@@ -54,7 +57,16 @@ elif args.dataset_type == 'enhancer':
     train_ds = EnhancerDataset(args, split='train')
     val_ds = EnhancerDataset(args, split='valid' if not args.validate_on_test else 'test')
     toy_data = None
+elif args.dataset_type == "ising":
+    train_ds = IsingDataset(args)
+    val_ds = IsingDataset(args)
+    toy_data = train_ds
+elif args.dataset_type == "Al-Cu":
+    train_ds = AlCuDataset(args)
+    val_ds = AlCuDataset(args)
+    toy_data = train_ds
 
+print("dataset initiated")
 if args.subset_train_as_val:
     val_set_size = len(val_ds) if args.constant_val_len is None else args.constant_val_len
     val_ds = Subset(train_ds, torch.randperm(len(train_ds))[:val_set_size])

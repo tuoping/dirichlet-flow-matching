@@ -1,6 +1,6 @@
 import copy
 import math
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import PIL
 import numpy as np
@@ -20,7 +20,7 @@ from utils.flow_utils import DirichletConditionalFlow, expand_simplex, sample_co
     get_wasserstein_dist, update_ema, load_flybrain_designed_seqs
 from lightning_modules.general_module import GeneralModule
 from utils.logging import get_logger
-
+from sklearn.cluster import KMeans
 
 logger = get_logger(__name__)
 
@@ -59,6 +59,7 @@ class DNAModule(GeneralModule):
     def validation_step(self, batch, batch_idx):
         self.stage = 'val'
         loss = self.general_step(batch, batch_idx)
+        self.log('val_perplexity', torch.tensor(self._log["val_perplexity"]).mean(), prog_bar=True)
         if self.args.validate:
             self.try_print_log()
 
@@ -66,14 +67,16 @@ class DNAModule(GeneralModule):
         self.iter_step += 1
         seq, cls = batch
         B, L = seq.shape
-
+        # xt: the probability path
         xt, alphas = sample_cond_prob_path(self.args, seq, self.model.alphabet_size)
         if self.args.mode == 'distill':
             if self.stage == 'val':
                 seq_distill = torch.zeros_like(seq, device=self.device)
             else:
+                # here xt=1, so logits = self.model(xt=1) performs one-step inference!
                 logits_distill, xt = self.dirichlet_flow_inference(seq, cls, model=self.distill_model, args=self.distill_args)
                 seq_distill = torch.argmax(logits_distill, dim=-1)
+                # seq_distill = torch.softmax(logits_distill, dim=-1)
             alphas = alphas * 0
         xt_inp = xt
         if self.args.mode == 'dirichlet' or self.args.mode == 'riemannian':
@@ -89,7 +92,7 @@ class DNAModule(GeneralModule):
         else:
             cls_inp = None
         logits = self.model(xt_inp, t=alphas, cls=cls_inp)
-
+        
         losses = torch.nn.functional.cross_entropy(logits.transpose(1, 2), seq_distill if self.args.mode == 'distill' else seq, reduction='none')
         losses = losses.mean(-1)
 
@@ -178,7 +181,7 @@ class DNAModule(GeneralModule):
                 flow_probs = torch.nn.functional.softmax(logits / args.flow_temp, -1) # [B, L, K]
 
             if args.cls_guidance:
-                probs_cond, cls_score = self.get_cls_guided_flow(xt, s + 1e-4, flow_probs)
+                probs_cond, cls_score = self.get_cls_guided_flow(xt, s + 1e-4, flow_probs, seq)
                 flow_probs = probs_cond * self.args.guidance_scale + flow_probs * (1 - self.args.guidance_scale)
 
             if not torch.allclose(flow_probs.sum(2), torch.ones((B, L), device=self.device), atol=1e-4) or not (flow_probs >= 0).all():
@@ -199,6 +202,7 @@ class DNAModule(GeneralModule):
 
             if not (flow_probs >= 0).all(): print(f'flow_probs.min(): {flow_probs.min()}')
             cond_flows = (eye - xt.unsqueeze(-1)) * c_factor.unsqueeze(-2)
+            # V=U*P: flow = conditional_flow*probability_path
             flow = (flow_probs.unsqueeze(-2) * cond_flows).sum(-1)
 
 
@@ -249,7 +253,7 @@ class DNAModule(GeneralModule):
         probs = torch.nn.functional.softmax(logits, dim=-1)
         probs_cond = torch.nn.functional.softmax(logits_cond, dim=-1)
 
-
+        # The K*K diagonal matrix D: cond_score_mats = D, score = D*Probability_path
         cond_scores_mats = ((alpha - 1) * (torch.eye(self.model.alphabet_size).to(xt)[None, :] / xt[..., None]))  # [B, L, K, K]
 
         cond_scores_mats = cond_scores_mats - cond_scores_mats.mean(2)[:, :, None, :]  # [B, L, K, K] now the columns sum up to 0
@@ -262,10 +266,11 @@ class DNAModule(GeneralModule):
         Q_mats[:, :, -1, :] = torch.ones((B, L, K))  # [B, L, K, K]
         score_guided_ = score_guided.clone()  # [B, L, K]
         score_guided_[:, :, -1] = torch.ones(B, L)  # [B, L, K]
+        # The cls_free_guided probability_path P: flow_guided=P:  Q_mats*flow_guided = score_guided_
         flow_guided = torch.linalg.solve(Q_mats, score_guided_)  # [B, L, K]
         return flow_guided
 
-    def get_cls_guided_flow(self, xt, alpha, p_x0_given_xt):
+    def get_cls_guided_flow(self, xt, alpha, p_x0_given_xt, seq):
         B, L, K = xt.shape
         # get the matrix of scores of the conditional probability flows for each simplex corner
         cond_scores_mats = ((alpha - 1) * (torch.eye(self.model.alphabet_size).to(xt)[None, :] / xt[..., None]))  # [B, L, K, K]
@@ -274,8 +279,9 @@ class DNAModule(GeneralModule):
 
         score = torch.einsum('ijkl,ijl->ijk', cond_scores_mats, p_x0_given_xt)  # [B, L, K] add up the columns of conditional flow scores weighted by the predicted probability of each corner
         # assert torch.allclose(score.sum(2), torch.zeros((B, L)),atol=1e-4)
+        print("score.shape = ", score.shape)
 
-        cls_score = self.get_cls_score(xt, alpha[None].expand(B))
+        cls_score = self.get_cls_score(xt, alpha[None].expand(B), seq)
         if self.args.scale_cls_score:
             norm_score = torch.norm(score, dim=2, keepdim=True)
             norm_cls_score = torch.norm(cls_score, dim=2, keepdim=True)
@@ -301,12 +307,13 @@ class DNAModule(GeneralModule):
             print("Warning: there were this many nans in the probs_cond of the classifier score: ", torch.isnan(p_x0_given_xt_y).sum(), "We are setting them to 0.")
             p_x0_given_xt_y = torch.nan_to_num(p_x0_given_xt_y)
         return p_x0_given_xt_y, cls_score
-    def get_cls_score(self, xt, alpha):
+    def get_cls_score(self, xt, alpha, seq):
         with torch.enable_grad():
             xt_ = xt.clone().detach().requires_grad_(True)
             xt_.requires_grad = True
             if self.args.cls_expanded_simplex:
-                xt_, prior_weights = expand_simplex(xt, alpha[None].expand(xt_.shape[0]), self.args.prior_pseudocount)
+                # xt_, prior_weights = expand_simplex(xt, alpha[None].expand(xt_.shape[0]), self.args.prior_pseudocount)
+                xt_expanded_simplex, prior_weights = expand_simplex(xt_, alpha, self.args.prior_pseudocount)
             if self.args.analytic_cls_score:
                 assert self.args.dataset_type == 'toy_fixed', 'analytic_cls_score can only be calculated for fixed dataset'
                 B, L, K = xt.shape
@@ -329,6 +336,17 @@ class DNAModule(GeneralModule):
                 p_y_given_xt = p_y_given_xt.prod(-1) # per sequence probabilities. Works because positions are independent.
                 log_prob = torch.log(p_y_given_xt).sum()
                 cls_score = torch.autograd.grad(log_prob, [xt_])[0]
+            elif self.args.dataset_type == "Al-Cu":
+                print("Scaling temperature by guidance")
+                cls_logits = self.model(xt_expanded_simplex, t=alpha)
+                # loss = torch.nn.functional.cross_entropy(cls_logits, torch.ones(len(xt), dtype=torch.long, device=xt.device) * self.args.target_class).mean()
+                seq_scale = torch.pow(seq, (620.0/420.0-1.0))
+                print(cls_logits.shape, seq_scale.shape)
+                loss = torch.nn.functional.cross_entropy(cls_logits, seq_scale).mean()
+                assert not torch.isnan(loss).any()
+                cls_score = - torch.autograd.grad(loss,[xt_])[0]  # need the minus because cross entropy loss puts a minus in front of log probability.
+                print("cls_score.shape = ", cls_score.shape)
+                assert not torch.isnan(cls_score).any()
             else:
                 cls_logits = self.cls_model(xt_, t=alpha)
                 loss = torch.nn.functional.cross_entropy(cls_logits, torch.ones(len(xt), dtype=torch.long, device=xt.device) * self.args.target_class).mean()
@@ -382,11 +400,39 @@ class DNAModule(GeneralModule):
         mean_log.update({'val_nan_inf_step_fraction': self.nan_inf_counter / self.inf_counter})
 
         mean_log.update({'epoch': float(self.trainer.current_epoch), 'step': float(self.trainer.global_step), 'iter_step': float(self.iter_step)})
-        if self.args.dataset_type == 'toy_sampled':
+        if self.args.dataset_type in ['toy_sampled']:
             all_seqs = torch.cat(self.val_outputs['seqs'], dim=0).cpu()
             all_seqs_one_hot = torch.nn.functional.one_hot(all_seqs, num_classes=self.args.toy_simplex_dim)
             counts = all_seqs_one_hot.sum(0).float()
             empirical_dist = counts / counts.sum(dim=-1, keepdim=True)
+            kl = (empirical_dist * (torch.log(empirical_dist) - torch.log(self.toy_data.probs[self.args.target_class]))).sum(-1).mean()
+            rkl = (self.toy_data.probs[self.args.target_class] * (torch.log(self.toy_data.probs[self.args.target_class]) - torch.log(empirical_dist))).sum(-1).mean()
+            sanity_self_kl = (empirical_dist * (torch.log(empirical_dist) - torch.log(empirical_dist))).sum(-1).mean()
+            mean_log.update({'val_kl': kl.cpu().item(), 'val_rkl': rkl.cpu().item(), 'val_sanity_self_kl': sanity_self_kl.cpu().item()})
+
+        if self.args.dataset_type in ['ising']:
+            all_seqs = torch.cat(self.val_outputs['seqs'], dim=0).cpu()
+            all_seqs_one_hot = (torch.nn.functional.one_hot(all_seqs, num_classes=self.args.toy_simplex_dim)*torch.tensor([1,-1])).sum(-1)
+            magn = all_seqs_one_hot.sum(-1).tolist()
+            counts_magn = Counter(magn)
+            counts = torch.tensor([counts_magn[k] for k in self.toy_data.rc] ).reshape(1,-1)
+            empirical_dist = counts / counts.sum(dim=-1, keepdim=True)
+
+            kl = (empirical_dist * (torch.log(empirical_dist) - torch.log(self.toy_data.probs[self.args.target_class]))).sum(-1).mean()
+            rkl = (self.toy_data.probs[self.args.target_class] * (torch.log(self.toy_data.probs[self.args.target_class]) - torch.log(empirical_dist))).sum(-1).mean()
+            sanity_self_kl = (empirical_dist * (torch.log(empirical_dist) - torch.log(empirical_dist))).sum(-1).mean()
+            mean_log.update({'val_kl': kl.cpu().item(), 'val_rkl': rkl.cpu().item(), 'val_sanity_self_kl': sanity_self_kl.cpu().item()})
+
+        if self.args.dataset_type in ['Al-Cu']:
+            all_seqs = torch.cat(self.val_outputs['seqs'], dim=0).cpu()
+            np.save(os.path.join(os.environ["MODEL_DIR"],f"epoch={self.trainer.current_epoch}-step={self.trainer.global_step}"), all_seqs.numpy())
+            est2 = KMeans(n_clusters=2)
+            est2.fit(all_seqs)
+            counts_labels = Counter(est2.labels_)
+            counts = torch.tensor(sorted([counts_labels[k] for k in [0,1]])).reshape(1,-1)
+
+            empirical_dist = counts / counts.sum(dim=-1, keepdim=True)
+
             kl = (empirical_dist * (torch.log(empirical_dist) - torch.log(self.toy_data.probs[self.args.target_class]))).sum(-1).mean()
             rkl = (self.toy_data.probs[self.args.target_class] * (torch.log(self.toy_data.probs[self.args.target_class]) - torch.log(empirical_dist))).sum(-1).mean()
             sanity_self_kl = (empirical_dist * (torch.log(empirical_dist) - torch.log(empirical_dist))).sum(-1).mean()
@@ -426,7 +472,7 @@ class DNAModule(GeneralModule):
             self.log_dict(mean_log, batch_size=1)
             if self.args.wandb:
                 wandb.log(mean_log)
-                if self.args.dataset_type == 'toy_sampled':
+                if self.args.dataset_type in ['toy_sampled', 'ising', 'Al-Cu']:
                     pil_dist_comp = self.plot_empirical_and_true(empirical_dist, self.toy_data.probs[self.args.target_class])
                     wandb.log({'fig': [wandb.Image(pil_dist_comp)], 'step': float(self.trainer.global_step), 'iter_step': float(self.iter_step)})
                 if self.args.cls_ckpt is not None:
@@ -490,14 +536,14 @@ class DNAModule(GeneralModule):
         # Creating a figure and axes
         fig, axes = plt.subplots(math.ceil(num_datasets_to_plot/2), 2, figsize=(10, 8))
         for i in range(num_datasets_to_plot):
-            row, col = i // 2, i % 2
+            # row, col = i // 2, i % 2
             x = np.arange(len(empirical_dist[i]))
-            axes[row, col].bar(x, empirical_dist[i], width, label=f'empirical')
-            axes[row, col].plot(x, true_dist[i], label=f'true density', color='orange')
-            axes[row, col].legend()
-            axes[row, col].set_title(f'Sequence position {i + 1}')
-            axes[row, col].set_xlabel('Category')
-            axes[row, col].set_ylabel('Density')
+            axes[i].bar(x, empirical_dist[i], width, label=f'empirical')
+            axes[i].plot(x, true_dist[i], label=f'true density', color='orange')
+            axes[i].legend()
+            axes[i].set_title(f'Sequence position {i + 1}')
+            axes[i].set_xlabel('Category')
+            axes[i].set_ylabel('Density')
         plt.tight_layout()
         fig.canvas.draw()
         pil_img = PIL.Image.frombytes('RGB', fig.canvas.get_width_height(), fig.canvas.tostring_rgb())

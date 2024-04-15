@@ -4,7 +4,7 @@ import pickle
 import torch, esm, random, os, json
 import numpy as np
 from Bio import SeqIO
-
+from collections import Counter
 
 
 
@@ -82,3 +82,87 @@ class ToyDataset(torch.utils.data.IterableDataset):
                 seq.append(torch.multinomial(replacement=True,num_samples=1,input=self.probs[cls,i,:]))
             yield torch.tensor(seq), cls
 
+
+class IsingDataset(torch.utils.data.Dataset):
+    def __init__(self, args):
+        super().__init__()
+        all_data = torch.from_numpy(np.load("data/ising/buffer.npy").reshape(-1,args.toy_simplex_dim,args.toy_seq_len))
+        print("loaded ", all_data.shape)
+        self.num_cls = 1
+        self.seq_len = args.toy_seq_len
+        self.alphabet_size = args.toy_simplex_dim
+
+        if args.cls_ckpt is not None:
+            distribution_dict = torch.load(os.path.join(os.path.dirname(args.cls_ckpt), 'toy_distribution_dict.pt'))
+            self.probs = distribution_dict['probs']
+            self.class_probs = distribution_dict['class_probs']
+        else:
+            self.seqs = torch.argmax(torch.swapaxes(all_data, 1, 2), dim=2)
+            self.clss = torch.argmax(torch.swapaxes(all_data, 1, 2), dim=2)
+
+            seqs_one_hot = (torch.nn.functional.one_hot(self.seqs, num_classes=args.toy_simplex_dim)*torch.tensor([1,-1])).sum(-1)
+            # seqs_one_hot = (torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)*torch.tensor([1,-1])).sum(-1)
+            self.rc = [-4,-2,0,2,4]
+            magn = seqs_one_hot.sum(-1).tolist()
+            counts_magn = Counter(magn)
+            counts = torch.tensor([counts_magn[k] for k in self.rc] ).reshape(self.num_cls, 1,-1)
+            self.probs = counts / counts.sum(dim=-1, keepdim=True)
+            print("probs = ", self.probs)
+            # self.probs = torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)
+            self.class_probs = torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)
+
+            print("loaded ", self.probs.shape, self.class_probs.shape)
+            distribution_dict = {'probs': self.probs, 'class_probs': self.class_probs}
+        torch.save(distribution_dict, os.path.join(os.environ["MODEL_DIR"], 'toy_distribution_dict.pt' ))
+
+    def __len__(self):
+        return len(self.seqs)
+
+    def __getitem__(self, idx):
+        return self.seqs[idx], self.clss[idx]
+    
+
+
+class AlCuDataset(torch.utils.data.Dataset):
+    def __init__(self, args):
+        super().__init__()
+        all_data = torch.from_numpy(np.load(f"data/{args.dataset_dir}/buffer_atypes.npy").reshape(-1,args.toy_simplex_dim,args.toy_seq_len))
+        print("loaded ", all_data.shape)
+        self.num_cls = 1
+        self.seq_len = args.toy_seq_len
+        self.alphabet_size = args.toy_simplex_dim
+
+        if args.cls_ckpt is not None:
+            distribution_dict = torch.load(os.path.join(os.path.dirname(args.cls_ckpt), 'toy_distribution_dict.pt'))
+            self.probs = distribution_dict['probs']
+            self.class_probs = distribution_dict['class_probs']
+        else:
+            # self.seqs_T0 = torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)
+            # if args.dataset_scaleTemp:
+            #     print("Rescaling dataset from 620K to 420K")
+            #     self.seqs = torch.pow(self.seqs_T0, 620.0/420.0)
+            # else:
+            #     self.seqs = self.seqs_T0
+    
+            self.seqs = torch.argmax(torch.swapaxes(all_data, 1, 2), dim=2).reshape(-1, *args.toy_seq_dim)
+            # self.clss = torch.argmax(torch.swapaxes(all_data, 1, 2), dim=2)
+            self.clss = torch.full_like(self.seqs, 0)
+
+            # from sklearn.cluster import KMeans
+            # est2 = KMeans(n_clusters=2)
+            # est2.fit(self.clss)
+            # counts_labels = Counter(est2.labels_)
+            # counts = torch.tensor([counts_labels[k] for k in [0,1]]).reshape(self.num_cls, 1,-1)
+            # self.probs = counts / counts.sum(dim=-1, keepdim=True)
+            # print("probs = ", self.probs)
+
+            # self.class_probs = torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)
+
+            # distribution_dict = {'probs': self.probs, 'class_probs': self.class_probs}
+        # torch.save(distribution_dict, os.path.join(os.environ["MODEL_DIR"], 'toy_distribution_dict.pt' ))
+
+    def __len__(self):
+        return len(self.seqs)
+
+    def __getitem__(self, idx):
+        return self.seqs[idx], self.clss[idx]

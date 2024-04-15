@@ -23,7 +23,7 @@ def parse_train_args():
     parser.add_argument("--subset_train_as_val", action='store_true')
     parser.add_argument("--validate_on_train", action='store_true')
     parser.add_argument("--validate_on_test", action='store_true')
-
+    parser.add_argument("--dataset_dir", default=None)
     # Training
     parser.add_argument("--limit_train_batches", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=2)
@@ -51,7 +51,9 @@ def parse_train_args():
     parser.add_argument("--taskiran_seq_path", type=str, default=None)
 
     # Data
-    parser.add_argument('--dataset_type', type=str, choices=['enhancer', 'toy_fixed','toy_sampled'], default='argmax')
+    parser.add_argument('--dataset_type', type=str, choices=['enhancer', 'toy_fixed','toy_sampled','ising',"Al-Cu"], default='argmax')
+    parser.add_argument('--dataset_scaleTemp', action="store_true")
+    
     parser.add_argument("--mel_enhancer", action='store_true')
     parser.add_argument("--overfit", action='store_true')
     parser.add_argument("--promoter_dataset", action='store_true')
@@ -90,7 +92,7 @@ def parse_train_args():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--num_cnn_stacks", type=int, default=1)
     parser.add_argument("--num_layers", type=int, default=1)
-    parser.add_argument("--hidden_dim", type=float, default=128)
+    parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--self_condition_ratio", type=float, default=0)
     parser.add_argument("--prior_self_condition", action="store_true")
     parser.add_argument("--no_token_dropout", action="store_true")
@@ -109,6 +111,7 @@ def parse_train_args():
     parser.add_argument("--print_freq", type=int, default=100)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--run_name", type=str, default="default")
+    parser.add_argument("--project_name", type=str, default="default")
     
     args = parser.parse_args()
     timestamp = datetime.fromtimestamp(datetime.now().timestamp()).strftime("%Y-%m-%d_%H-%M-%S")
@@ -122,8 +125,8 @@ def parse_train_args():
     sys.stderr = Logger(logpath=os.path.join(os.environ['MODEL_DIR'], f'log.log'), syspart=sys.stderr)
     if args.wandb:
         if subprocess.check_output(["git", "status", "-s"]):
-            print('There were uncommited changes. Not running that stuff.')
-            exit()
+            print('WARNING:: There were uncommited changes. Not running that stuff.')
+            # exit()
     args.commit = (
         subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
     )
