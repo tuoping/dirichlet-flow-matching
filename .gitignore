@@ -47,3 +47,4 @@ slurm-*
 workdir
 taskdir
 benchmarks
+logs-*
