@@ -27,7 +27,6 @@ __pycache__/
 esm/dev
 workdir/
 models/
-data
 commands.sh
 .ref.npz
 .ref.val.npz
