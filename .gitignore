@@ -43,3 +43,7 @@ commands.sh
 *.out
 wandb/
 *.ipynb
+slurm-*
+workdir
+taskdir
+benchmarks
