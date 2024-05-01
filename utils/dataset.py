@@ -83,11 +83,95 @@ class ToyDataset(torch.utils.data.IterableDataset):
             yield torch.tensor(seq), cls
 
 
+def pbc(i,L=4):
+    assert i>=-1 and i<=L
+    if i-L == 0:
+        return 0
+    elif i == -1:
+        return L-1
+    else:
+        return i
+    
+
+def ising_boltzman_prob(seq, J=1, kBT=4.0):
+    shape = seq.shape
+    spins = seq.clone().detach()
+    spins[torch.where(spins==0)]=-1
+    B,H,W = shape
+    E = torch.zeros(B)
+    for i in range(H):
+        for j in range(W):
+            E += -spins[:,i,j]*spins[:,pbc(i-1),j]*J
+            E += -spins[:,i,j]*spins[:,pbc(i+1),j]*J
+            E += -spins[:,i,j]*spins[:,i,pbc(j-1)]*J
+            E += -spins[:,i,j]*spins[:,i,pbc(j+1)]*J
+
+    E /= 2
+    prob = torch.exp(-E/kBT)
+    return prob, E/kBT
+
+
+def RC(logits):
+    assert logits.shape[-1] == 2
+    B = logits.shape[0]
+    RC = torch.sum(logits*torch.tensor([-1,1])[None,None,None,:], dim=-1)
+    RC = torch.sum(RC.reshape(B, -1), dim=-1)
+    return RC.reshape(-1,1)
+
+class UmbrellaSampling():
+    def __init__(self, RC):
+        self.RC = RC
+    
+    def buffer2rc_trajs(self, x):
+        self.rc_trajs = self.RC(x)
+
+    def mbar(self, rc_min=None, rc_max=None, rc_bins=31, return_fes=False):
+        """ Estimates free energy along reaction coordinate with binless WHAM / MBAR.
+
+        Parameters
+        ----------
+        rc_min : float or None
+            Minimum bin position. If None, the minimum RC value will be used.
+        rc_max : float or None
+            Maximum bin position. If None, the maximum RC value will be used.
+        rc_bins : int or None
+            Number of bins
+
+        Returns
+        -------
+        bins : array
+            Bin positions
+        F : array
+            Free energy / -log(p) for all bins
+
+        """
+        if rc_min is None:
+            rc_min = np.concatenate(self.rc_trajs).min()
+        if rc_max is None:
+            rc_max = np.concatenate(self.rc_trajs).max()
+        gmeans = torch.tensor(np.linspace(rc_min, rc_max, rc_bins))
+        gstd = (rc_max - rc_min) / rc_bins
+        # self.kmat = torch.exp(-(self.rc_trajs - gmeans)*(self.rc_trajs - gmeans) / (2 * gstd * gstd))
+        kmat = torch.exp(-(self.rc_trajs - gmeans)*(self.rc_trajs - gmeans) / (2 * gstd * gstd))/ (torch.exp(-(self.rc_trajs - gmeans)*(self.rc_trajs - gmeans) / (2 * gstd * gstd))).sum(axis=1).reshape(-1,1)
+        kmat += 1e-6
+        histogram = kmat.mean(axis=0).requires_grad_(True)  
+        # del norm_kmat
+        FES = -torch.log(histogram)
+        print("gmeans = ", gmeans)
+        print("FES (kBT) = ", FES)
+        F = torch.sum(FES)
+        # del FES
+        print("F_RC = ", F)
+        if return_fes:
+            return F, gmeans, FES, histogram
+        else:
+            return F
+
 class IsingDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         super().__init__()
-        all_data = torch.from_numpy(np.load("data/ising/buffer.npy").reshape(-1,args.toy_simplex_dim,args.toy_seq_len))
-        print("loaded ", all_data.shape)
+        all_data = torch.from_numpy(np.load(f"data/{args.dataset_dir}/buffer.npy"))
+        print("loaded ", all_data.shape, all_data.dtype)
         self.num_cls = 1
         self.seq_len = args.toy_seq_len
         self.alphabet_size = args.toy_simplex_dim
@@ -97,23 +181,13 @@ class IsingDataset(torch.utils.data.Dataset):
             self.probs = distribution_dict['probs']
             self.class_probs = distribution_dict['class_probs']
         else:
-            self.seqs = torch.argmax(torch.swapaxes(all_data, 1, 2), dim=2)
-            self.clss = torch.argmax(torch.swapaxes(all_data, 1, 2), dim=2)
-
-            seqs_one_hot = (torch.nn.functional.one_hot(self.seqs, num_classes=args.toy_simplex_dim)*torch.tensor([1,-1])).sum(-1)
-            # seqs_one_hot = (torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)*torch.tensor([1,-1])).sum(-1)
-            self.rc = [-4,-2,0,2,4]
-            magn = seqs_one_hot.sum(-1).tolist()
-            counts_magn = Counter(magn)
-            counts = torch.tensor([counts_magn[k] for k in self.rc] ).reshape(self.num_cls, 1,-1)
-            self.probs = counts / counts.sum(dim=-1, keepdim=True)
-            print("probs = ", self.probs)
-            # self.probs = torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)
-            self.class_probs = torch.softmax(torch.swapaxes(all_data, 1, 2), dim=2)
-
-            print("loaded ", self.probs.shape, self.class_probs.shape)
-            distribution_dict = {'probs': self.probs, 'class_probs': self.class_probs}
-        torch.save(distribution_dict, os.path.join(os.environ["MODEL_DIR"], 'toy_distribution_dict.pt' ))
+            self.seqs = all_data.reshape(-1, *args.toy_seq_dim).to(torch.int64)
+            self.seqs[torch.where(self.seqs == -1)] = 0
+            # self.clss = torch.full_like(self.seqs, 0)
+            prob,scaled_energy = ising_boltzman_prob(self.seqs)
+            self.clss = prob
+            # distribution_dict = {'probs': self.probs, 'class_probs': self.class_probs}
+        # torch.save(distribution_dict, os.path.join(os.environ["MODEL_DIR"], 'toy_distribution_dict.pt' ))
 
     def __len__(self):
         return len(self.seqs)
