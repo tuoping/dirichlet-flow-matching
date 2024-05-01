@@ -41,9 +41,9 @@ commands.sh
 *.gz
 *.out
 wandb/
-*.ipynb
 slurm-*
 workdir
 taskdir
 benchmarks
 logs-*
+data/
