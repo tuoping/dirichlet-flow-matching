@@ -8,9 +8,9 @@ import os,sys
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = "expandable_segments:True"
 
 # os.environ["MODEL_DIR"]="logs-local"
-os.environ["MODEL_DIR"]=f"benchmarks/{sys.argv[2]}hiddendim/hidden{sys.argv[1]}"
-os.environ["work_dir"]=os.path.join(os.environ["MODEL_DIR"], f"val_time0_scale_T0overTk/epoch{sys.argv[3]}")
-# os.environ["work_dir"]=os.path.join(os.environ["MODEL_DIR"], f"val_baseline/epoch{sys.argv[3]}")
+os.environ["MODEL_DIR"]=f"logs-dir/testloss{sys.argv[2]}_CNN64"
+os.environ["work_dir"]=os.path.join(os.environ["MODEL_DIR"], f"val_time0_scale_T0overTk/epoch{sys.argv[1]}")
+# os.environ["work_dir"]=os.path.join(os.environ["MODEL_DIR"], f"val_baseline/epoch{sys.argv[1]}")
 dataset_dir = "Al-Cu"
 
 stage = "val"
@@ -18,7 +18,8 @@ channels = 2
 seq_len = 500
 seq_dim = (2*5, 2*5, 5)
 ckpt = None
-ckpt = os.path.join(os.environ["MODEL_DIR"], f"model-epoch={sys.argv[3]}-train_loss=0.11.ckpt")
+import glob
+ckpt = glob.glob(os.path.join(os.environ["MODEL_DIR"], f"model-epoch={sys.argv[1]}-train_loss=*"))[0]
 if stage == "train":
     batch_size = 128
     if ckpt is not None: 
@@ -90,7 +91,7 @@ train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, num_
 val_loader = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers)
 
 class Hyperparams():
-    def __init__(self, hidden_dim=16, num_cnn_stacks=1, lr=5e-4, dropout=0.0, cls_free_guidance=False, clean_data=False, model="MLP"):
+    def __init__(self, mode=None, hidden_dim=16, num_cnn_stacks=1, lr=5e-4, dropout=0.0, cls_free_guidance=False, clean_data=False, model="MLP"):
         self.hidden_dim = hidden_dim
         self.dropout = dropout
         self.cls_free_guidance = cls_free_guidance
@@ -101,10 +102,10 @@ class Hyperparams():
         self.seq_dim = seq_dim
         self.channels = channels
         self.model = model
-
-    def simplex_params(self, cls_expanded_simplex=False, mode="dirichlet", time_scale=2, time0_scale = 1):
-        self.cls_expanded_simplex = cls_expanded_simplex
         self.mode = mode
+
+    def simplex_params(self, cls_expanded_simplex=False, time_scale=2, time0_scale = 1):
+        self.cls_expanded_simplex = cls_expanded_simplex
         self.time_scale = time_scale
         self.alpha_max = 8
         self.num_integration_steps = 20
@@ -112,7 +113,7 @@ class Hyperparams():
         self.allow_nan_cfactor = True
         self.time0_scale = time0_scale
 
-hparams = Hyperparams(clean_data=True, num_cnn_stacks=2, hidden_dim=int(sys.argv[1]), model=sys.argv[2])
+hparams = Hyperparams(clean_data=True, num_cnn_stacks=2, hidden_dim=int(64), model="CNN")
 hparams.simplex_params()
 # hparams.flow_temp = 620./420.
 if "time0_scale" in os.environ["work_dir"]:

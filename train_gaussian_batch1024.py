@@ -8,23 +8,23 @@ import os,sys
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = "expandable_segments:True"
 
 # os.environ["MODEL_DIR"]="logs-local"
-os.environ["MODEL_DIR"]=f"logs-dir-ising/"
+os.environ["MODEL_DIR"]=f"logs-gaussian-ising/latt4x4-batch1024-model4_fl/"
 os.environ["work_dir"]=os.environ["MODEL_DIR"]
 
-dataset_dir = "ising-latt8x8-T2.8"
+dataset_dir = "ising-latt4x4-T4.0"
 
 stage = "train"
 # channels = 2
 # seq_len = 500
 # seq_dim = (2*5, 2*5, 5)
 channels = 2
-seq_len= 8*8
-seq_dim = (8,8)
+seq_len= 4*4
+seq_dim = (4,4)
 ckpt = None
 import glob
-ckpt = glob.glob(os.path.join(os.environ["MODEL_DIR"], f"model-epoch={sys.argv[1]}-train_loss=*"))[0]
+# ckpt = glob.glob(os.path.join(os.environ["MODEL_DIR"], f"model-epoch={sys.argv[1]}-train_loss=*"))[0]
 if stage == "train":
-    batch_size = 128
+    batch_size = 1024
     if ckpt is not None: 
         print("Starting from ckpt:: ", ckpt)
 elif stage == "val":
@@ -64,7 +64,7 @@ trainer = pl.Trainer(
             save_top_k=-1,  # Save the top 3 models
             monitor='train_loss',  # Monitor validation loss
             mode='min',  # Minimize validation loss
-            every_n_train_steps=10000,  # Checkpoint every 1000 training steps
+            every_n_train_steps=2000,  # Checkpoint every 1000 training steps
         )
     ],
     check_val_every_n_epoch=check_val_every_n_epoch,
@@ -108,6 +108,7 @@ class Hyperparams():
         self.channels = channels
         self.model = model
         self.mode = mode
+        self.gamma_focal=5
 
     def simplex_params(self, cls_expanded_simplex=False, time_scale=2, time0_scale = 1):
         self.cls_expanded_simplex = cls_expanded_simplex
@@ -118,15 +119,17 @@ class Hyperparams():
         self.allow_nan_cfactor = True
         self.time0_scale = time0_scale
 
-loss_mode = "loss3"
-print("extra loss::", loss_mode)
+    def gaussian_params(self, time_scale=2, time0_scale = 1):
+        self.sigma_min = 0.0001
+        self.time_scale = time_scale
+        self.time0_scale = time0_scale
+        self.num_integration_steps = 20
 
+hparams = Hyperparams(clean_data=True, num_cnn_stacks=3, hidden_dim=int(128), model="CNN2D", mode="focal")
+hparams.gaussian_params()
 
-hparams = Hyperparams(clean_data=True, num_cnn_stacks=2, hidden_dim=int(64), model="CNN2D", mode=loss_mode)
-hparams.simplex_params()
-
-from lightning_modules.simplex_module import simplexModule
-model = simplexModule(channels, num_cls=2, hyperparams=hparams)
+from lightning_modules.gaussian_module import gaussianModule
+model = gaussianModule(channels, num_cls=2, hyperparams=hparams)
 
 if stage == "train":
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt)

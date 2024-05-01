@@ -8,23 +8,23 @@ import os,sys
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = "expandable_segments:True"
 
 # os.environ["MODEL_DIR"]="logs-local"
-os.environ["MODEL_DIR"]=f"logs-dir-ising/"
+os.environ["MODEL_DIR"]=f"logs-dir-ising2nn/latt4x4T4.8-batch1024-model4/"
 os.environ["work_dir"]=os.environ["MODEL_DIR"]
 
-dataset_dir = "ising-latt8x8-T2.8"
+dataset_dir = "ising2nn-latt4x4-T4.8"
 
 stage = "train"
 # channels = 2
 # seq_len = 500
 # seq_dim = (2*5, 2*5, 5)
 channels = 2
-seq_len= 8*8
-seq_dim = (8,8)
+seq_len= 4*4
+seq_dim = (4,4)
 ckpt = None
 import glob
-ckpt = glob.glob(os.path.join(os.environ["MODEL_DIR"], f"model-epoch={sys.argv[1]}-train_loss=*"))[0]
+# ckpt = glob.glob(os.path.join(os.environ["MODEL_DIR"], f"model-epoch={sys.argv[1]}-train_loss=*"))[0]
 if stage == "train":
-    batch_size = 128
+    batch_size = 1024
     if ckpt is not None: 
         print("Starting from ckpt:: ", ckpt)
 elif stage == "val":
@@ -47,32 +47,6 @@ wandb = False
 check_val_every_n_epoch = None
 val_check_interval = None
 
-trainer = pl.Trainer(
-    default_root_dir=os.environ["MODEL_DIR"],
-    accelerator="gpu" if torch.cuda.is_available() else 'auto',
-    max_steps=max_steps,
-    max_epochs=max_epochs,
-    num_sanity_val_steps=0,
-    limit_train_batches=limit_train_batches,
-    limit_val_batches=limit_val_batches,
-    enable_progress_bar=not (wandb) or os.getlogin() == 'ping-tuo',
-    gradient_clip_val=grad_clip,
-    callbacks=[
-        ModelCheckpoint(
-            dirpath=os.environ["MODEL_DIR"],
-            filename='model-{epoch:02d}-{train_loss:.2f}',
-            save_top_k=-1,  # Save the top 3 models
-            monitor='train_loss',  # Monitor validation loss
-            mode='min',  # Minimize validation loss
-            every_n_train_steps=10000,  # Checkpoint every 1000 training steps
-        )
-    ],
-    check_val_every_n_epoch=check_val_every_n_epoch,
-    val_check_interval=val_check_interval,
-    log_every_n_steps=1,
-    precision=16,
-    strategy='ddp_find_unused_parameters_true'
-)
 
 class dataset_params():
     def __init__(self, toy_seq_len, toy_seq_dim, toy_simplex_dim, dataset_dir):
@@ -108,6 +82,7 @@ class Hyperparams():
         self.channels = channels
         self.model = model
         self.mode = mode
+        self.gamma_focal = 10.
 
     def simplex_params(self, cls_expanded_simplex=False, time_scale=2, time0_scale = 1):
         self.cls_expanded_simplex = cls_expanded_simplex
@@ -118,15 +93,59 @@ class Hyperparams():
         self.allow_nan_cfactor = True
         self.time0_scale = time0_scale
 
-loss_mode = "loss3"
+loss_mode = None
 print("extra loss::", loss_mode)
+# tempscale_list = 4.0/torch.tensor([2.8, 3.2, 3.6, 4.0, 4.4, 4.8, 5.2, 5.6])+1
 
-
-hparams = Hyperparams(clean_data=True, num_cnn_stacks=2, hidden_dim=int(64), model="CNN2D", mode=loss_mode)
+hparams = Hyperparams(clean_data=True, num_cnn_stacks=3, hidden_dim=int(128), model="CNN2D", mode=loss_mode)
 hparams.simplex_params()
 
 from lightning_modules.simplex_module import simplexModule
 model = simplexModule(channels, num_cls=2, hyperparams=hparams)
+
+
+
+# import wandb
+# wandb.init(
+#     entity="anonymized",
+#     settings=wandb.Settings(start_method="fork"),
+#     project="betawolf",
+#     name=args.run_name,
+#     config=args,
+# )
+# from lightning.pytorch.loggers import WandbLogger
+# 
+# 
+# wandb_logger = WandbLogger(project="my-project")
+# wandb_logger.watch(model, log="all")
+
+trainer = pl.Trainer(
+    default_root_dir=os.environ["MODEL_DIR"],
+    accelerator="gpu" if torch.cuda.is_available() else 'auto',
+    max_steps=max_steps,
+    max_epochs=max_epochs,
+    num_sanity_val_steps=0,
+    limit_train_batches=limit_train_batches,
+    limit_val_batches=limit_val_batches,
+    enable_progress_bar=not (wandb) or os.getlogin() == 'ping-tuo',
+    gradient_clip_val=grad_clip,
+    callbacks=[
+        ModelCheckpoint(
+            dirpath=os.environ["MODEL_DIR"],
+            filename='model-{epoch:02d}-{train_loss:.2f}',
+            save_top_k=-1,  # Save the top 3 models
+            monitor='train_loss',  # Monitor validation loss
+            mode='min',  # Minimize validation loss
+            every_n_train_steps=2000,  # Checkpoint every 1000 training steps
+        )
+    ],
+    check_val_every_n_epoch=check_val_every_n_epoch,
+    val_check_interval=val_check_interval,
+    log_every_n_steps=1,
+    precision=16,
+    strategy='ddp_find_unused_parameters_true'
+)
+
 
 if stage == "train":
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt)
